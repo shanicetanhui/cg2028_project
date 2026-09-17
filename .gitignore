@@ -11,3 +11,4 @@ build/
 *.launch
 .DS_Store
 Thumbs.db
+cg2028_project.cfg
