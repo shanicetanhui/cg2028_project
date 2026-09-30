@@ -37,8 +37,12 @@
 //#define REBOUND_ACCEL_THRESHOLD 	4.0f
 //#define REBOUND_DELTA_THRESHOLD 	2.5f
 #define IMPACT_WINDOW_MS	      	1500U
-#define RECOVERY_BTN_TIMEOUT_MS  	10000U
+//#define RECOVERY_BTN_TIMEOUT_MS  	10000U
 #define EMERGENCY_BLINK_MS			500U
+#define LONG_LIE_TIMEOUT_MS       10000U   // no movement at all -> emergency
+#define MOVEMENT_GRACE_TIMEOUT_MS 20000U   // movement seen -> extended grace period
+#define MOVEMENT_ACCEL_DELTA         1.0f  // m/s^2 sample-to-sample change = movement
+#define MOVEMENT_GYRO_THRESHOLD     15.0f  // dps, well below ANGULAR_THRESHOLD (80)
 
 #define FILTER_WARMUP_SAMPLES 		1U
 
@@ -183,6 +187,8 @@ int main(void)
     uint32_t last_alarm_blink = last_sample;
     uint32_t last_emergency_toggle = last_sample;
     uint8_t emergency_oled_on = 0;
+    uint8_t movement_detected_in_alarm = 0;
+    float prev_accel_norm = 0.0f;
 
     OLED_ShowState(fall_state);
     UART_Send("INFO: Beginning fall detection\r\n");
@@ -335,6 +341,7 @@ int main(void)
 					fall_state = STATE_ALARM;
 					alarm_start = now;
 					last_alarm_blink = now;
+					movement_detected_in_alarm = 0;
 					Buzzer_Set(1);
 					BSP_LED_On(LED2);
 					OLED_ShowState(fall_state);
@@ -344,33 +351,50 @@ int main(void)
         }
 
         if (fall_state == STATE_ALARM) {
-        	/* Fast LED blink while alarm is active. */
-        	if ((now - last_alarm_blink) >= FALL_LED_DELAY_MS) {
-        		BSP_LED_Toggle(LED2);
-        		last_alarm_blink = now;
-        	}
-        	/* Buzzer toggling on and off. */
-        	if ((now - last_buzzer_toggle) >= 300)
-        	{
-        	    buzzer_on = !buzzer_on;
-        	    Buzzer_Set(buzzer_on);
-        	    last_buzzer_toggle = now;
-        	}
+            /* Fast LED blink while alarm is active. */
+            if ((now - last_alarm_blink) >= FALL_LED_DELAY_MS) {
+                BSP_LED_Toggle(LED2);
+                last_alarm_blink = now;
+            }
+            /* Buzzer toggling on and off. */
+            if ((now - last_buzzer_toggle) >= 300)
+            {
+                buzzer_on = !buzzer_on;
+                Buzzer_Set(buzzer_on);
+                last_buzzer_toggle = now;
+            }
 
-        	if (Button_WasPressed()) {
-        		fall_state = STATE_NORMAL;
-        		buzzer_on = 0;
-        		Buzzer_Set(0);
-        		BSP_LED_Off(LED2);
-        		OLED_ShowState(fall_state);
-        		UART_Send("INFO: recovery confirmed by button press\r\n");
-        	}
-        	else if ((now - alarm_start) >= RECOVERY_BTN_TIMEOUT_MS) {
-        		fall_state = STATE_EMERGENCY;
-        		last_emergency_toggle = now;
-        		emergency_oled_on = 0;
-        		UART_Send("ALARM: no response, escalating to emergency\r\n");
-        	}
+            /* Track whether any movement has occurred since alarm started. Ignore movement in 1st second. */
+            if (!movement_detected_in_alarm &&
+                (now - alarm_start) >= 1000U &&
+                (fabsf(accel_norm - prev_accel_norm) > MOVEMENT_ACCEL_DELTA ||
+                 gyro_norm > MOVEMENT_GYRO_THRESHOLD)) {
+                movement_detected_in_alarm = 1;
+                UART_Send("INFO: movement detected during alarm, extending grace period to 20s\r\n");
+            }
+
+            uint32_t escalation_timeout = movement_detected_in_alarm
+                                         ? MOVEMENT_GRACE_TIMEOUT_MS
+                                         : LONG_LIE_TIMEOUT_MS;
+
+            if (Button_WasPressed()) {
+                fall_state = STATE_NORMAL;
+                buzzer_on = 0;
+                Buzzer_Set(0);
+                BSP_LED_Off(LED2);
+                OLED_ShowState(fall_state);
+                UART_Send("INFO: recovery confirmed by button press\r\n");
+            }
+            else if ((now - alarm_start) >= escalation_timeout) {
+                fall_state = STATE_EMERGENCY;
+                last_emergency_toggle = now;
+                emergency_oled_on = 0;
+                if (movement_detected_in_alarm) {
+                    UART_Send("ALARM: movement seen but no button press, escalating to emergency\r\n");
+                } else {
+                    UART_Send("ALARM: no movement detected (long lie), escalating to emergency\r\n");
+                }
+            }
         }
 
         if (fall_state == STATE_EMERGENCY) {
@@ -419,6 +443,8 @@ int main(void)
         	HAL_Delay(SAMPLE_PERIOD_MS - (HAL_GetTick() - last_sample));
         }
         last_sample = HAL_GetTick();
+
+        prev_accel_norm = accel_norm;
 
         sample_number++;
     }
