@@ -45,6 +45,9 @@
 static void UART1_Init(void);
 static void UART_Send(const char *text);
 static void I2C1_Init(void);
+static void Buzzer_Init(void);
+static uint32_t last_buzzer_toggle = 0;
+static uint8_t buzzer_on = 0;
 
 typedef enum
 {
@@ -67,7 +70,11 @@ static char *FallState_ToString(FallState state)
 }
 
 /* Replace hooks with buzzer/OLED driver calls. */
-static void Buzzer_Set(uint8_t on) { (void)on; }
+static void Buzzer_Set(uint8_t on)
+{
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14,
+                      on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
 
 static volatile uint8_t button_flag = 0;
 
@@ -141,6 +148,17 @@ int main(void)
 
     I2C1_Init();
     ssd1306_Init();
+    Buzzer_Init();
+
+    /* Testing buzzer:
+    while (1)
+    {
+        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_SET);
+        HAL_Delay(5000);   // ON for 5 seconds
+
+        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_RESET);
+        HAL_Delay(5000);   // OFF for 5 seconds
+    } */
 
     BSP_LED_Off(LED2);
 
@@ -331,9 +349,17 @@ int main(void)
         		BSP_LED_Toggle(LED2);
         		last_alarm_blink = now;
         	}
+        	/* Buzzer toggling on and off. */
+        	if ((now - last_buzzer_toggle) >= 300)
+        	{
+        	    buzzer_on = !buzzer_on;
+        	    Buzzer_Set(buzzer_on);
+        	    last_buzzer_toggle = now;
+        	}
 
         	if (Button_WasPressed()) {
         		fall_state = STATE_NORMAL;
+        		buzzer_on = 0;
         		Buzzer_Set(0);
         		BSP_LED_Off(LED2);
         		OLED_ShowState(fall_state);
@@ -354,6 +380,8 @@ int main(void)
 				last_alarm_blink = now;
 			}
 
+        	Buzzer_Set(1);
+
         	/* Flash "CALL 995" on OLED. */
         	if ((now - last_emergency_toggle) >= EMERGENCY_BLINK_MS) {
         		emergency_oled_on = !emergency_oled_on;
@@ -370,6 +398,7 @@ int main(void)
 
         	if (Button_WasPressed()) {
         		fall_state = STATE_NORMAL;
+        		buzzer_on = 0;
         		Buzzer_Set(0);
         		BSP_LED_Off(LED2);
         		OLED_ShowState(fall_state);
@@ -453,7 +482,8 @@ static void I2C1_Init(void)
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
     hi2c1.Instance				= I2C1;
-    hi2c1.Init.Timing          	= ((uint32_t)0x00702681);   // match BSP's I2C timing
+    //hi2c1.Init.Timing          	= ((uint32_t)0x00702681);   // match BSP's I2C timing
+    hi2c1.Init.Timing = 0x00100D14;
     hi2c1.Init.OwnAddress1     	= 0;
     hi2c1.Init.AddressingMode  	= I2C_ADDRESSINGMODE_7BIT;
     hi2c1.Init.DualAddressMode 	= I2C_DUALADDRESS_DISABLE;
@@ -463,6 +493,22 @@ static void I2C1_Init(void)
     hi2c1.Init.NoStretchMode  	= I2C_NOSTRETCH_DISABLE;
 
     if (HAL_I2C_Init(&hi2c1) != HAL_OK) { while (1) {} }
+}
+
+static void Buzzer_Init(void)
+{
+    __HAL_RCC_GPIOD_CLK_ENABLE();
+
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_14;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+
+    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+    /* Start with buzzer off */
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_RESET);
 }
 
 /* Do not modify these lines. They suppress UART-related warnings. */
