@@ -32,19 +32,16 @@
 #define FREEFALL_THRESHOLD          4.5f
 #define FREEFALL_MIN_SAMPLES		2
 #define CATCH_THRESHOLD 			7.0f
-//#define IMPACT_THRESHOLD            11.0f
 #define ANGULAR_THRESHOLD      	    80.0f
-//#define REBOUND_ACCEL_THRESHOLD 	4.0f
-//#define REBOUND_DELTA_THRESHOLD 	2.5f
 #define IMPACT_WINDOW_MS	      	1500U
-//#define RECOVERY_BTN_TIMEOUT_MS  	10000U
 #define EMERGENCY_BLINK_MS			500U
 #define LAST_FALL_DISPLAY_MS   		3000U
-#define LONG_LIE_TIMEOUT_MS       10000U   // no movement at all -> emergency
-#define MOVEMENT_GRACE_TIMEOUT_MS 20000U   // movement seen -> extended grace period
-#define MOVEMENT_ACCEL_DELTA         1.0f  // m/s^2 sample-to-sample change = movement
+#define LONG_LIE_TIMEOUT_MS       	10000U   // no movement at all -> emergency
+#define MOVEMENT_GRACE_TIMEOUT_MS 	20000U   // movement seen -> extended grace period
+#define MOVEMENT_ACCEL_DELTA        1.0f  // m/s^2 sample-to-sample change = movement
 #define MOVEMENT_GYRO_THRESHOLD     15.0f  // dps, well below ANGULAR_THRESHOLD (80)
 #define FILTER_WARMUP_SAMPLES 		1U
+#define ALARM_OLED_TOGGLE_MS   		800U
 
 static void UART1_Init(void);
 static void UART_Send(const char *text);
@@ -121,6 +118,14 @@ static void OLED_WriteCentered(uint8_t y, const char *str, SSD1306_Font_t font, 
     ssd1306_WriteString((char *)str, font, color);
 }
 
+static void OLED_ShowRecoveryPrompt(void)
+{
+    ssd1306_Fill(Black);
+    OLED_WriteCentered(14, "Press btn", Font_11x18, White);
+    OLED_WriteCentered(36, "if okay",   Font_11x18, White);
+    ssd1306_UpdateScreen();
+}
+
 static void OLED_ShowState(FallState state)
 {
     ssd1306_Fill(Black);
@@ -183,6 +188,8 @@ int main(void)
     uint32_t last_fall_info_start = 0;
     uint8_t movement_detected_in_alarm = 0;
     float prev_accel_norm = 0.0f;
+    uint32_t last_alarm_oled_toggle = 0;
+    uint8_t  alarm_oled_showing_prompt = 0;
 
     OLED_ShowState(fall_state);
     UART_Send("INFO: Beginning fall detection\r\n");
@@ -317,12 +324,12 @@ int main(void)
                     snprintf(line2, sizeof(line2), "%lu min ago", elapsed_min);
                 } else {
                     snprintf(line1, sizeof(line1), "No fall");
-                    snprintf(line2, sizeof(line2), "recorded yet");
+                    snprintf(line2, sizeof(line2), "recorded");
                 }
 
                 ssd1306_Fill(Black);
-                OLED_WriteCentered(18, line1, Font_7x10, White);
-                OLED_WriteCentered(34, line2, Font_7x10, White);
+                OLED_WriteCentered(14, line1, Font_11x18, White);
+                OLED_WriteCentered(36, line2, Font_11x18, White);
                 ssd1306_UpdateScreen();
                 UART_Send("INFO: Logging most recent fall info");
             }
@@ -368,6 +375,8 @@ int main(void)
                     last_fall_tick = now;
 					fall_ever_occurred = 1;
                     movement_detected_in_alarm = 0;
+                    last_alarm_oled_toggle = now;
+                    alarm_oled_showing_prompt = 0;
 					Buzzer_Set(1);
 					BSP_LED_On(LED2);
 					OLED_ShowState(fall_state);
@@ -388,6 +397,18 @@ int main(void)
                 buzzer_on = !buzzer_on;
                 Buzzer_Set(buzzer_on);
                 last_buzzer_toggle = now;
+            }
+
+            /* Alternate OLED between state text and recovery prompt. */
+            if ((now - last_alarm_oled_toggle) >= ALARM_OLED_TOGGLE_MS) {
+                alarm_oled_showing_prompt = !alarm_oled_showing_prompt;
+                last_alarm_oled_toggle = now;
+
+                if (alarm_oled_showing_prompt) {
+                    OLED_ShowRecoveryPrompt();
+                } else {
+                    OLED_ShowState(fall_state);
+                }
             }
 
             /* Track whether any movement has occurred since alarm started. Ignore movement in 1st second. */
@@ -439,10 +460,10 @@ int main(void)
 
         		ssd1306_Fill(Black);
         		if (emergency_oled_on) {
-        			ssd1306_SetCursor(0, 19);
-        			ssd1306_WriteString(FallState_ToString(fall_state), Font_16x26, White);
+        			OLED_ShowState(fall_state);
+        		} else {
+        			OLED_ShowRecoveryPrompt();
         		}
-        		ssd1306_UpdateScreen();
         	}
 
         	if (Button_WasPressed()) {
