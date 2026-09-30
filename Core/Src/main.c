@@ -39,11 +39,11 @@
 #define IMPACT_WINDOW_MS	      	1500U
 //#define RECOVERY_BTN_TIMEOUT_MS  	10000U
 #define EMERGENCY_BLINK_MS			500U
+#define LAST_FALL_DISPLAY_MS   		3000U
 #define LONG_LIE_TIMEOUT_MS       10000U   // no movement at all -> emergency
 #define MOVEMENT_GRACE_TIMEOUT_MS 20000U   // movement seen -> extended grace period
 #define MOVEMENT_ACCEL_DELTA         1.0f  // m/s^2 sample-to-sample change = movement
 #define MOVEMENT_GYRO_THRESHOLD     15.0f  // dps, well below ANGULAR_THRESHOLD (80)
-
 #define FILTER_WARMUP_SAMPLES 		1U
 
 static void UART1_Init(void);
@@ -154,16 +154,6 @@ int main(void)
     ssd1306_Init();
     Buzzer_Init();
 
-    /* Testing buzzer:
-    while (1)
-    {
-        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_SET);
-        HAL_Delay(5000);   // ON for 5 seconds
-
-        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_RESET);
-        HAL_Delay(5000);   // OFF for 5 seconds
-    } */
-
     BSP_LED_Off(LED2);
 
     /* Previous EWMA outputs. The first test/application sample starts from 0. */
@@ -187,6 +177,10 @@ int main(void)
     uint32_t last_alarm_blink = last_sample;
     uint32_t last_emergency_toggle = last_sample;
     uint8_t emergency_oled_on = 0;
+    uint32_t last_fall_tick = 0;
+    uint8_t  fall_ever_occurred = 0;
+    uint8_t  showing_last_fall_info = 0;
+    uint32_t last_fall_info_start = 0;
     uint8_t movement_detected_in_alarm = 0;
     float prev_accel_norm = 0.0f;
 
@@ -304,11 +298,40 @@ int main(void)
         uint32_t now = HAL_GetTick();
 
         if (fall_state == STATE_NORMAL) {
-           	/* Normal operation: 1 second heartbeat blink. */
-			if ((now - last_normal_blink) >= NORMAL_LED_DELAY_MS) {
-				BSP_LED_Toggle(LED2);
-				last_normal_blink = now;
-			}
+            /* Normal operation: 1 second heartbeat blink. */
+            if ((now - last_normal_blink) >= NORMAL_LED_DELAY_MS) {
+                BSP_LED_Toggle(LED2);
+                last_normal_blink = now;
+            }
+
+            /* Show "last fall" info on button press, but only if not already showing it. */
+            if (!showing_last_fall_info && Button_WasPressed()) {
+                showing_last_fall_info = 1;
+                last_fall_info_start = now;
+
+                char line1[20];
+                char line2[20];
+                if (fall_ever_occurred) {
+                    uint32_t elapsed_min = (now - last_fall_tick) / 60000UL;
+                    snprintf(line1, sizeof(line1), "Last fall:");
+                    snprintf(line2, sizeof(line2), "%lu min ago", elapsed_min);
+                } else {
+                    snprintf(line1, sizeof(line1), "No fall");
+                    snprintf(line2, sizeof(line2), "recorded yet");
+                }
+
+                ssd1306_Fill(Black);
+                OLED_WriteCentered(18, line1, Font_7x10, White);
+                OLED_WriteCentered(34, line2, Font_7x10, White);
+                ssd1306_UpdateScreen();
+                UART_Sent("INFO: Logging most recent fall info");
+            }
+
+            /* Revert to the normal state screen after the display window. */
+            if (showing_last_fall_info && ((now - last_fall_info_start) >= LAST_FALL_DISPLAY_MS)) {
+                showing_last_fall_info = 0;
+                OLED_ShowState(fall_state);
+            }
 
             if (accel_norm < FREEFALL_THRESHOLD) {
                 freefall_count++;
@@ -318,10 +341,11 @@ int main(void)
                     impact_seen = angular_seen = 0;
                     peak_accel_candidate = accel_norm;
                     freefall_count = 0;
+                    showing_last_fall_info = 0;
                     OLED_ShowState(fall_state);
                 }
             } else {
-                freefall_count = 0;   // reset if it doesn't stay low
+                freefall_count = 0;
             }
         }
 
@@ -341,7 +365,9 @@ int main(void)
 					fall_state = STATE_ALARM;
 					alarm_start = now;
 					last_alarm_blink = now;
-					movement_detected_in_alarm = 0;
+                    last_fall_tick = now;
+					fall_ever_occurred = 1;
+                    movement_detected_in_alarm = 0;
 					Buzzer_Set(1);
 					BSP_LED_On(LED2);
 					OLED_ShowState(fall_state);
@@ -415,7 +441,6 @@ int main(void)
         		if (emergency_oled_on) {
         			ssd1306_SetCursor(0, 19);
         			ssd1306_WriteString(FallState_ToString(fall_state), Font_16x26, White);
-//        			OLED_ShowState(fall_state);
         		}
         		ssd1306_UpdateScreen();
         	}
@@ -509,7 +534,7 @@ static void I2C1_Init(void)
 
     hi2c1.Instance				= I2C1;
     //hi2c1.Init.Timing          	= ((uint32_t)0x00702681);   // match BSP's I2C timing
-    hi2c1.Init.Timing = 0x00100D14;
+    hi2c1.Init.Timing 			= 0x00100D14;
     hi2c1.Init.OwnAddress1     	= 0;
     hi2c1.Init.AddressingMode  	= I2C_ADDRESSINGMODE_7BIT;
     hi2c1.Init.DualAddressMode 	= I2C_DUALADDRESS_DISABLE;
