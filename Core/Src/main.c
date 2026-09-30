@@ -324,7 +324,7 @@ int main(void)
                 OLED_WriteCentered(18, line1, Font_7x10, White);
                 OLED_WriteCentered(34, line2, Font_7x10, White);
                 ssd1306_UpdateScreen();
-                UART_Sent("INFO: Logging most recent fall info");
+                UART_Send("INFO: Logging most recent fall info");
             }
 
             /* Revert to the normal state screen after the display window. */

@@ -42,7 +42,6 @@
 @
 @ Write your program from here.
 ewma_filter:
-@    PUSH {r4-r7, lr}
 @ eqn: output = [alpha_percent x new_data + (100 - alpha_percent) x old_output] / 100
 @ diff = 100 - alpha_percent
 @ term1 = alpha_percent × new_data
@@ -58,7 +57,5 @@ ewma_filter:
     MOV R3, #100
     SDIV R0, R0, R3
     BX LR
-
-@    POP  {r4-r7, pc}
 
 .size ewma_filter, .-ewma_filter
