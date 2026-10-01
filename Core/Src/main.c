@@ -28,7 +28,7 @@
 #define NORMAL_LED_DELAY_MS      	1000
 #define FALL_LED_DELAY_MS         	150
 
-/* Fall detection*/
+/* Fall detection */
 #define FREEFALL_THRESHOLD          4.5f
 #define FREEFALL_MIN_SAMPLES		2
 #define CATCH_THRESHOLD 			7.0f
@@ -36,10 +36,10 @@
 #define IMPACT_WINDOW_MS	      	1500U
 #define EMERGENCY_BLINK_MS			500U
 #define LAST_FALL_DISPLAY_MS   		3000U
-#define LONG_LIE_TIMEOUT_MS       	10000U   // no movement at all -> emergency
-#define MOVEMENT_GRACE_TIMEOUT_MS 	20000U   // movement seen -> extended grace period
-#define MOVEMENT_ACCEL_DELTA        1.0f  // m/s^2 sample-to-sample change = movement
-#define MOVEMENT_GYRO_THRESHOLD     15.0f  // dps, well below ANGULAR_THRESHOLD (80)
+#define LONG_LIE_TIMEOUT_MS       	10000U   	// no movement at all -> emergency
+#define MOVEMENT_GRACE_TIMEOUT_MS 	20000U   	// movement seen -> extended grace period
+#define MOVEMENT_ACCEL_DELTA        1.0f  		// m/s^2 sample-to-sample change = movement
+#define MOVEMENT_GYRO_THRESHOLD     15.0f  		// dps, well below ANGULAR_THRESHOLD (80)
 #define FILTER_WARMUP_SAMPLES 		1U
 #define ALARM_OLED_TOGGLE_MS   		800U
 
@@ -70,7 +70,6 @@ static char *FallState_ToString(FallState state)
     }
 }
 
-/* Replace hooks with buzzer/OLED driver calls. */
 static void Buzzer_Set(uint8_t on)
 {
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14,
@@ -79,6 +78,8 @@ static void Buzzer_Set(uint8_t on)
 
 static volatile uint8_t button_flag = 0;
 
+/* ISR for USER button, fires on every falling edge (press),
+ * debounces, sets button flag for main loop */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     static uint32_t last_press_tick = 0;
@@ -89,6 +90,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     }
 }
 
+/* Reads and clears button flag when set, each press consumed exactly once */
 static uint8_t Button_WasPressed(void)
 {
 	if (button_flag) {
@@ -98,6 +100,7 @@ static uint8_t Button_WasPressed(void)
 	return 0;
 }
 
+/* Writes the string to the OLED so that it is horizontally centered */
 static void OLED_WriteCentered(uint8_t y, const char *str, SSD1306_Font_t font, SSD1306_COLOR color)
 {
     size_t len = strlen(str);
@@ -118,6 +121,7 @@ static void OLED_WriteCentered(uint8_t y, const char *str, SSD1306_Font_t font, 
     ssd1306_WriteString((char *)str, font, color);
 }
 
+/* Recovery message prompt after fall has been detected */
 static void OLED_ShowRecoveryPrompt(void)
 {
     ssd1306_Fill(Black);
@@ -126,6 +130,7 @@ static void OLED_ShowRecoveryPrompt(void)
     ssd1306_UpdateScreen();
 }
 
+/* Show current state of user on OLED */
 static void OLED_ShowState(FallState state)
 {
     ssd1306_Fill(Black);
@@ -138,6 +143,24 @@ static void OLED_ShowState(FallState state)
     ssd1306_UpdateScreen();
 }
 
+/* Alternates the OLED between the current state screen and the recovery
+ * prompt, on a timer. Shared by STATE_ALARM and STATE_EMERGENCY, which
+ * never run simultaneously. */
+static void OLED_ToggleStatePrompt(FallState state, uint32_t now, uint32_t interval_ms,
+                                    uint32_t *last_toggle, uint8_t *showing_prompt)
+{
+    if ((now - *last_toggle) >= interval_ms) {
+        *showing_prompt = !*showing_prompt;
+        *last_toggle = now;
+
+        if (*showing_prompt) {
+            OLED_ShowRecoveryPrompt();
+        } else {
+            OLED_ShowState(state);
+        }
+    }
+}
+
 extern int ewma_filter(int new_data, int old_output, int alpha_percent);
 //int ewma_filter_C(int new_data, int old_output, int alpha_percent);
 
@@ -146,6 +169,7 @@ I2C_HandleTypeDef hi2c1;
 
 int main(void)
 {
+	// Setup
     HAL_Init();
     UART1_Init();
 
@@ -169,27 +193,38 @@ int main(void)
     int accel_ewma_c[3] = {0, 0, 0};
     int gyro_ewma_c[3]  = {0, 0, 0};
 
+    /* --- Loop pacing --- */
     unsigned long sample_number = 0;
-    FallState fall_state = STATE_NORMAL;
-    uint32_t candidate_start = 0;
-    uint8_t impact_seen = 0;
-    uint8_t angular_seen = 0;
     uint32_t last_sample = HAL_GetTick();
+
+    /* --- Fall-detection state machine --- */
+    FallState fall_state = STATE_NORMAL;
+
+    /* --- STATE_NORMAL: heartbeat LED --- */
     uint32_t last_normal_blink = last_sample;
+
+    /* --- STATE_CANDIDATE: freefall -> impact confirmation --- */
+    uint32_t candidate_start = 0;
+    uint8_t  impact_seen = 0;
+    uint8_t  angular_seen = 0;
     static uint8_t freefall_count = 0;
-    float peak_accel_candidate = 0.0f;
+    float    peak_accel_candidate = 0.0f;
+
+    /* --- STATE_ALARM: fast blink, buzzer, long-lie / movement escalation --- */
     uint32_t alarm_start = 0;
     uint32_t last_alarm_blink = last_sample;
-    uint32_t last_emergency_toggle = last_sample;
-    uint8_t emergency_oled_on = 0;
+    uint8_t  movement_detected_in_alarm = 0;
+    float    prev_accel_norm = 0.0f;
+
+    /* --- STATE_ALARM and STATE_EMERGENCY OLED toggle --- */
+    uint32_t last_oled_toggle = 0;
+    uint8_t  oled_showing_prompt = 0;
+
+    /* --- "Last fall" info screen (button press while in STATE_NORMAL) --- */
     uint32_t last_fall_tick = 0;
     uint8_t  fall_ever_occurred = 0;
     uint8_t  showing_last_fall_info = 0;
     uint32_t last_fall_info_start = 0;
-    uint8_t movement_detected_in_alarm = 0;
-    float prev_accel_norm = 0.0f;
-    uint32_t last_alarm_oled_toggle = 0;
-    uint8_t  alarm_oled_showing_prompt = 0;
 
     OLED_ShowState(fall_state);
     UART_Send("INFO: Beginning fall detection\r\n");
@@ -245,6 +280,7 @@ int main(void)
             gyro_ewma_asm[2] / 1000.0f
         };
 
+        /* UART debug string for raw accel and gyro values */
         char raw_values_buffer[320];
         int len = snprintf(raw_values_buffer, sizeof(raw_values_buffer),
                  "Sample %lu\r\n"
@@ -254,6 +290,7 @@ int main(void)
                  accel_mps2[0], accel_mps2[1], accel_mps2[2],
                  gyro_dps[0], gyro_dps[1], gyro_dps[2]);
 
+        /* Stabilise values before checking state */
         if (sample_number < FILTER_WARMUP_SAMPLES)
         {
             fall_state = STATE_NORMAL;
@@ -296,6 +333,7 @@ int main(void)
 								gyro_dps[2] * gyro_dps[2]);
 
 
+        /* UART debug string for normalised accel and gyro values */
         char norm_values_buffer[120];
         snprintf(norm_values_buffer, sizeof(norm_values_buffer),
                  "Accel norm = %.2f m/s^2, Gyro norm = %.2f dps\r\n",
@@ -340,6 +378,7 @@ int main(void)
                 OLED_ShowState(fall_state);
             }
 
+            /* 2 consecutive low accel_norm readings will promote fall_state to CANDIDATE */
             if (accel_norm < FREEFALL_THRESHOLD) {
                 freefall_count++;
                 if (freefall_count >= FREEFALL_MIN_SAMPLES) {
@@ -356,6 +395,8 @@ int main(void)
             }
         }
 
+        /* If accel_norm exceeds the CATCH_THRESHOLD or if gyro_norm exceeds the ANGULAR_THRESHOLD
+         * within IMPACT_WINDOW_MS, promote fall_state to ALARM. Else, return to NORMAL */
         if (fall_state == STATE_CANDIDATE) {
             if (accel_norm > peak_accel_candidate) {
                 peak_accel_candidate = accel_norm;
@@ -375,8 +416,8 @@ int main(void)
                     last_fall_tick = now;
 					fall_ever_occurred = 1;
                     movement_detected_in_alarm = 0;
-                    last_alarm_oled_toggle = now;
-                    alarm_oled_showing_prompt = 0;
+                    last_oled_toggle = now;
+                    oled_showing_prompt = 0;
 					Buzzer_Set(1);
 					BSP_LED_On(LED2);
 					OLED_ShowState(fall_state);
@@ -385,6 +426,7 @@ int main(void)
             }
         }
 
+        /* Check for long lie or movement, escalate fall_state to EMERGENCY if button has not be pressed within timeout */
         if (fall_state == STATE_ALARM) {
             /* Fast LED blink while alarm is active. */
             if ((now - last_alarm_blink) >= FALL_LED_DELAY_MS) {
@@ -400,18 +442,10 @@ int main(void)
             }
 
             /* Alternate OLED between state text and recovery prompt. */
-            if ((now - last_alarm_oled_toggle) >= ALARM_OLED_TOGGLE_MS) {
-                alarm_oled_showing_prompt = !alarm_oled_showing_prompt;
-                last_alarm_oled_toggle = now;
+            OLED_ToggleStatePrompt(fall_state, now, ALARM_OLED_TOGGLE_MS, &last_oled_toggle, &oled_showing_prompt);
 
-                if (alarm_oled_showing_prompt) {
-                    OLED_ShowRecoveryPrompt();
-                } else {
-                    OLED_ShowState(fall_state);
-                }
-            }
-
-            /* Track whether any movement has occurred since alarm started. Ignore movement in 1st second. */
+            /* Track whether any movement has occurred since alarm started. Ignore movement in 1st second.
+             * Else, return to NORMAL */
             if (!movement_detected_in_alarm &&
                 (now - alarm_start) >= 1000U &&
                 (fabsf(accel_norm - prev_accel_norm) > MOVEMENT_ACCEL_DELTA ||
@@ -434,8 +468,8 @@ int main(void)
             }
             else if ((now - alarm_start) >= escalation_timeout) {
                 fall_state = STATE_EMERGENCY;
-                last_emergency_toggle = now;
-                emergency_oled_on = 0;
+                last_oled_toggle = now;
+                oled_showing_prompt = 0;
                 if (movement_detected_in_alarm) {
                     UART_Send("ALARM: movement seen but no button press, escalating to emergency\r\n");
                 } else {
@@ -444,6 +478,7 @@ int main(void)
             }
         }
 
+        /* Keep fall_state as EMERGENCY until button has been pressed, then return to NORMAL */
         if (fall_state == STATE_EMERGENCY) {
         	/* Keep LED fast-blinking and buzzer on as before. */
         	if ((now - last_alarm_blink) >= FALL_LED_DELAY_MS) {
@@ -454,17 +489,7 @@ int main(void)
         	Buzzer_Set(1);
 
         	/* Flash "CALL 995" on OLED. */
-        	if ((now - last_emergency_toggle) >= EMERGENCY_BLINK_MS) {
-        		emergency_oled_on = !emergency_oled_on;
-        		last_emergency_toggle = now;
-
-        		ssd1306_Fill(Black);
-        		if (emergency_oled_on) {
-        			OLED_ShowState(fall_state);
-        		} else {
-        			OLED_ShowRecoveryPrompt();
-        		}
-        	}
+        	OLED_ToggleStatePrompt(fall_state, now, EMERGENCY_BLINK_MS, &last_oled_toggle, &oled_showing_prompt);
 
         	if (Button_WasPressed()) {
         		fall_state = STATE_NORMAL;
@@ -476,6 +501,7 @@ int main(void)
         	}
         }
 
+        /* UART debug */
         if (len > 0 && len < (int)sizeof(raw_values_buffer))
         {
         	snprintf(raw_values_buffer + len, sizeof(raw_values_buffer) - len,
@@ -540,33 +566,33 @@ static void UART1_Init(void)
     }
 }
 
+/* I2C1 Init */
 static void I2C1_Init(void)
 {
     __HAL_RCC_GPIOB_CLK_ENABLE();
     __HAL_RCC_I2C1_CLK_ENABLE();
 
     GPIO_InitTypeDef GPIO_InitStruct = {0};
-    GPIO_InitStruct.Pin       = GPIO_PIN_8 | GPIO_PIN_9;   // PB8=SCL, PB9=SDA
-    GPIO_InitStruct.Mode      = GPIO_MODE_AF_OD;           // I2C must be open-drain
+    GPIO_InitStruct.Pin       = GPIO_PIN_8 | GPIO_PIN_9;	// PB8=SCL, PB9=SDA
+    GPIO_InitStruct.Mode      = GPIO_MODE_AF_OD;			// I2C must be open-drain
     GPIO_InitStruct.Pull      = GPIO_PULLUP;
     GPIO_InitStruct.Speed     = GPIO_SPEED_FREQ_HIGH;
     GPIO_InitStruct.Alternate = GPIO_AF4_I2C1;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
     hi2c1.Instance				= I2C1;
-    //hi2c1.Init.Timing          	= ((uint32_t)0x00702681);   // match BSP's I2C timing
-    hi2c1.Init.Timing 			= 0x00100D14;
+    hi2c1.Init.Timing 			= 0x00100D14;				// ??
     hi2c1.Init.OwnAddress1     	= 0;
     hi2c1.Init.AddressingMode  	= I2C_ADDRESSINGMODE_7BIT;
     hi2c1.Init.DualAddressMode 	= I2C_DUALADDRESS_DISABLE;
     hi2c1.Init.OwnAddress2     	= 0;
-//    hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
     hi2c1.Init.GeneralCallMode 	= I2C_GENERALCALL_DISABLE;
     hi2c1.Init.NoStretchMode  	= I2C_NOSTRETCH_DISABLE;
 
     if (HAL_I2C_Init(&hi2c1) != HAL_OK) { while (1) {} }
 }
 
+/* Buzzer Init */
 static void Buzzer_Init(void)
 {
     __HAL_RCC_GPIOD_CLK_ENABLE();
