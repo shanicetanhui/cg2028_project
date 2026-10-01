@@ -29,11 +29,11 @@
 #define FALL_LED_DELAY_MS         	150
 
 /* Fall detection */
-#define FREEFALL_THRESHOLD          4.5f
+#define FREEFALL_THRESHOLD          4.5f   	    // m/s^2
 #define FREEFALL_MIN_SAMPLES		2
-#define CATCH_THRESHOLD 			7.0f
-#define ANGULAR_THRESHOLD      	    80.0f
-#define IMPACT_WINDOW_MS	      	1500U
+#define CATCH_THRESHOLD 			7.0f   	    // m/s^2
+#define ANGULAR_THRESHOLD      	    80.0f   	// dps — rapid rotation during a fall/tumble
+#define IMPACT_WINDOW_MS	      	1500U   	// wait time for fall confirmation
 #define EMERGENCY_BLINK_MS			500U
 #define LAST_FALL_DISPLAY_MS   		3000U
 #define LONG_LIE_TIMEOUT_MS       	10000U   	// no movement at all -> emergency
@@ -47,6 +47,7 @@ static void UART1_Init(void);
 static void UART_Send(const char *text);
 static void I2C1_Init(void);
 static void Buzzer_Init(void);
+int ewma_filter_C(int new_data, int old_output, int alpha_percent);
 static uint32_t last_buzzer_toggle = 0;
 static uint8_t buzzer_on = 0;
 
@@ -70,6 +71,7 @@ static char *FallState_ToString(FallState state)
     }
 }
 
+/* Active/digital Grove buzzer: simple GPIO HIGH/LOW toggle. */
 static void Buzzer_Set(uint8_t on)
 {
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14,
@@ -162,7 +164,6 @@ static void OLED_ToggleStatePrompt(FallState state, uint32_t now, uint32_t inter
 }
 
 extern int ewma_filter(int new_data, int old_output, int alpha_percent);
-//int ewma_filter_C(int new_data, int old_output, int alpha_percent);
 
 UART_HandleTypeDef huart1;
 I2C_HandleTypeDef hi2c1;
@@ -409,7 +410,11 @@ int main(void)
                 if (accel_norm > CATCH_THRESHOLD)  impact_seen  = 1;
                 if (gyro_norm  > ANGULAR_THRESHOLD) angular_seen = 1;
 
-                if (impact_seen || angular_seen) {
+                /* OR, not AND: a soft caught fall may not spike accel sharply, and a
+                    * controlled/non-tumbling fall may not rotate much either. Free-fall
+                    * entry already filters out near-falls, so requiring both here was
+                    * too strict against real drop-and-catch test data. */
+                if (impact_seen || angular_seen) { 
 					fall_state = STATE_ALARM;
 					alarm_start = now;
 					last_alarm_blink = now;
@@ -581,7 +586,7 @@ static void I2C1_Init(void)
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
     hi2c1.Instance				= I2C1;
-    hi2c1.Init.Timing 			= 0x00100D14;				// ??
+    hi2c1.Init.Timing 			= 0x00100D14;				// CubeMX timing value for the default 4 MHz MSI clock.
     hi2c1.Init.OwnAddress1     	= 0;
     hi2c1.Init.AddressingMode  	= I2C_ADDRESSINGMODE_7BIT;
     hi2c1.Init.DualAddressMode 	= I2C_DUALADDRESS_DISABLE;
